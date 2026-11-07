@@ -32,6 +32,14 @@ interface WireMessage {
 
 export interface PlaintextPayload {
   kind: "text" | "attachment" | "system" | "delete-request";
+  /** The logical message id, assigned once by the sender and carried
+   * inside the encrypted payload so every recipient device agrees on it —
+   * unlike the transport-layer envelope id (server-assigned, and different
+   * per fanned-out device/recipient), this is what "delete for everyone"
+   * references via targetMessageId, and the only reliable way to look a
+   * message up by identity across different local databases. Auto-assigned
+   * by sendToContact/sendGroupMessage if the caller didn't set it. */
+  id?: string;
   text?: string;
   attachment?: { attachmentId: string; filename: string; mimeType: string; size: number; decryptionKey: string };
   /** Only for kind "delete-request": the id of an earlier message the
@@ -56,6 +64,7 @@ function fromWireHeader(h: WireHeader): RatchetHeader {
  * encrypted copy per recipient device, which is the normal (not a bug)
  * multi-device behavior for a pairwise ratchet. */
 export async function sendToContact(identity: IdentityKeyPair, selfAccountId: string, contact: ContactRow, payload: PlaintextPayload): Promise<void> {
+  payload.id ??= randomUUID();
   const deviceIds = await deliverRawToAccount(identity, contact.accountId, contact.username, padMessage(utf8(JSON.stringify(payload))));
 
   if (payload.kind === "delete-request" && payload.targetMessageId) {
@@ -133,7 +142,7 @@ async function sendEnvelope(
 
 async function persistOutgoing(conversationId: string, selfAccountId: string, payload: PlaintextPayload): Promise<void> {
   const row: MessageRow = {
-    id: randomUUID(),
+    id: payload.id ?? randomUUID(),
     conversationId,
     isGroup: false,
     direction: "out",
@@ -200,7 +209,7 @@ export async function receiveMessage(identity: IdentityKeyPair, event: Extract<G
   }
 
   const row: MessageRow = {
-    id: message.id,
+    id: payload.id ?? message.id,
     conversationId: message.fromAccountId,
     isGroup: false,
     direction: "in",

@@ -20,11 +20,15 @@ export function useConversations(): ConversationSummary[] | undefined {
       const existing = lastByConversation.get(m.conversationId);
       if (existing && existing.at >= m.createdAt) continue;
       let text: string | null = null;
-      try {
-        const payload = readPlaintext(m);
-        text = payload.kind === "text" ? payload.text ?? null : payload.kind === "attachment" ? `📎 ${payload.attachment?.filename ?? "attachment"}` : "System message";
-      } catch {
-        text = null;
+      if (m.deletedForEveryone) {
+        text = "This message was deleted";
+      } else {
+        try {
+          const payload = readPlaintext(m);
+          text = payload.kind === "text" ? payload.text ?? null : payload.kind === "attachment" ? `📎 ${payload.attachment?.filename ?? "attachment"}` : "System message";
+        } catch {
+          text = null;
+        }
       }
       lastByConversation.set(m.conversationId, { at: m.createdAt, text });
     }

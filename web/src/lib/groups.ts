@@ -165,6 +165,7 @@ async function saveSenderKey(groupId: string, accountId: string, isOwn: boolean,
  * already have generated its own Sender Key for the group (via
  * rotateAndDistribute, run at group creation / on joining). */
 export async function sendGroupMessage(selfAccountId: string, groupId: string, payload: PlaintextPayload): Promise<void> {
+  payload.id ??= randomUUID();
   const state = await loadSenderKey(groupId, selfAccountId);
   if (!state) throw new Error("No local Sender Key for this group yet — call rotateAndDistribute first");
 
@@ -190,7 +191,7 @@ export async function requestGroupDeleteForEveryone(selfAccountId: string, group
 
 async function persistGroupMessage(groupId: string, selfAccountId: string, payload: PlaintextPayload): Promise<void> {
   const row: MessageRow = {
-    id: randomUUID(),
+    id: payload.id ?? randomUUID(),
     conversationId: groupId,
     isGroup: true,
     direction: "out",
@@ -239,7 +240,7 @@ export async function handleGroupMessage(
   }
 
   const row: MessageRow = {
-    id: message.id,
+    id: payload.id ?? message.id,
     conversationId: groupId,
     isGroup: true,
     direction: "in",
