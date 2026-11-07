@@ -125,13 +125,20 @@ export async function handleDistribution(identity: IdentityKeyPair, message: Par
   await db.groupSenderKeys.put(row);
 
   if (wire.groupName) {
-    const existing = await db.groups.get(wire.groupId);
-    await db.groups.put({
-      groupId: wire.groupId,
-      name: wire.groupName,
-      memberAccountIds: existing?.memberAccountIds ?? [],
-      createdAt: existing?.createdAt ?? Date.now(),
-      disappearingSeconds: existing?.disappearingSeconds,
+    // Atomic read-modify-write: this races against this same account's own
+    // "control" membership-changed notification (the server notifies every
+    // member, including whoever just created/changed the group) touching
+    // the same db.groups row. Without a single transaction, an interleaved
+    // read-before-write from either side can silently drop the other's field.
+    await db.transaction("rw", db.groups, async () => {
+      const existing = await db.groups.get(wire.groupId);
+      await db.groups.put({
+        groupId: wire.groupId,
+        name: wire.groupName!,
+        memberAccountIds: existing?.memberAccountIds ?? [],
+        createdAt: existing?.createdAt ?? Date.now(),
+        disappearingSeconds: existing?.disappearingSeconds,
+      });
     });
   }
 }
@@ -276,12 +283,18 @@ export async function handleMembershipChanged(message: Extract<GatewayEvent, { t
   if (message.envelopeType !== "control") return;
   const control = JSON.parse(fromUtf8(fromBase64(message.ciphertext))) as MembershipChangedControl;
   if (control.kind !== "group-membership-changed") return;
-  const existing = await db.groups.get(control.groupId);
-  await db.groups.put({
-    groupId: control.groupId,
-    name: existing?.name ?? "",
-    memberAccountIds: control.members,
-    createdAt: existing?.createdAt ?? Date.now(),
-    disappearingSeconds: existing?.disappearingSeconds,
+  // Same atomicity concern as handleDistribution's groupName write above —
+  // this and that both read-then-write the same db.groups row and the
+  // server fans this notification out to every member, including the
+  // account that triggered it.
+  await db.transaction("rw", db.groups, async () => {
+    const existing = await db.groups.get(control.groupId);
+    await db.groups.put({
+      groupId: control.groupId,
+      name: existing?.name ?? "",
+      memberAccountIds: control.members,
+      createdAt: existing?.createdAt ?? Date.now(),
+      disappearingSeconds: existing?.disappearingSeconds,
+    });
   });
 }

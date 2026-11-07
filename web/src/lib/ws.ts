@@ -39,6 +39,12 @@ class Gateway {
       this.reconnectDelay = 1000;
     };
     socket.onmessage = (ev) => {
+      // A superseded socket (disconnect() followed immediately by a new
+      // connect(), as React StrictMode's double-effect does on every dev
+      // mount) can still be mid-close when this fires — ignore anything
+      // from a socket that isn't the current one, so listeners never see
+      // the same push event delivered twice.
+      if (this.socket !== socket) return;
       try {
         const data = JSON.parse(ev.data) as GatewayEvent;
         for (const l of this.listeners) l(data);
@@ -47,6 +53,9 @@ class Gateway {
       }
     };
     socket.onclose = () => {
+      // Same supersession check for reconnects: a stale socket's close must
+      // never schedule a reconnect on behalf of the connection that replaced it.
+      if (this.socket !== socket) return;
       if (this.closedByUser) return;
       this.reconnectTimer = setTimeout(() => this.open(), this.reconnectDelay);
       this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30_000);

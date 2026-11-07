@@ -52,6 +52,15 @@ they also compromise the network link.
   which case the server still sees the *recipient* and approximate timing),
   message sizes (padded, but padding has limits), approximate send/receive
   timestamps, and IP address (minimized retention, not eliminated).
+- **Double Ratchet header metadata.** The header (a rotating X25519 public
+  key, a previous-chain-length counter, and a per-chain message counter) is
+  sent in plaintext next to the ciphertext — only the body is encrypted.
+  This lets the server (or anyone who can read the wire/DB) see roughly how
+  often each pairwise ratchet is advancing and correlate a device's rotating
+  public keys across messages, even though it learns nothing about content.
+  Signal's production clients make the same tradeoff for the same reason:
+  encrypting the header would require guessing which of many skipped keys to
+  try, which doesn't scale.
 - **Traffic analysis by a global passive adversary** (timing/size
   correlation across many users). Padding and sealed-sender raise cost, they
   do not eliminate this class of attack.
@@ -84,24 +93,33 @@ they also compromise the network link.
 
 ## Cryptographic building blocks (all from vetted libraries, never hand-rolled)
 
-- Primitives: libsodium (`libsodium-wrappers`) — X25519, Ed25519, XChaCha20-Poly1305
-  AEAD, BLAKE2b, Argon2id, a CSPRNG (`randombytes_buf`).
+- Primitives: the audited `@noble/*` libraries (`@noble/curves`, `@noble/ciphers`,
+  `@noble/hashes`) — X25519 and Ed25519 (`@noble/curves`), XChaCha20-Poly1305
+  AEAD (`@noble/ciphers`), BLAKE2b/SHA-256/HKDF and Argon2id (`@noble/hashes`),
+  and a CSPRNG via the platform's `crypto.getRandomValues`.
 - Key agreement: X3DH, built from the primitives above following the published
   Signal spec (https://signal.org/docs/specifications/x3dh/).
 - Message encryption: the Double Ratchet, built from the primitives above
   following the published Signal spec
-  (https://signal.org/docs/specifications/doubleratchet/).
+  (https://signal.org/docs/specifications/doubleratchet/). The ratchet
+  header (sender's current DH public key, previous-chain length, message
+  counter) travels **unencrypted** alongside each ciphertext — see "Known
+  limitations" below for what that exposes.
 - Group messaging: Sender Keys (Signal's approach — a per-sender symmetric
   ratchet distributed 1:1 to each member over an already-established Double
   Ratchet session), not a hand-rolled scheme.
 - Password authentication: OPAQUE (a real PAKE — the server never sees the
   password or a function of it that could be brute-forced offline from a
-  database dump), via an audited OPAQUE implementation. See `server/README.md`
-  for the exact tradeoff if a fallback (salted Argon2id) is used instead.
+  database dump), via `@serenity-kit/opaque` (a WASM binding to the Rust
+  `opaque-ke` crate).
+- Local-storage-at-rest encryption (the per-device vault that every private
+  key and cached plaintext passes through before touching IndexedDB): Argon2id
+  key derivation from the user's optional App Lock passcode (OWASP-minimum
+  parameters), then XChaCha20-Poly1305. See `web/src/lib/vault.ts`.
 
 Where protocol logic (X3DH, Double Ratchet, Sender Keys) is implemented in
 this repo rather than imported wholesale from `libsignal`, it is implemented
-strictly from the published specification on top of libsodium primitives, and
+strictly from the published specification on top of `@noble/*` primitives, and
 tested against known-answer / interoperability-style tests in
 `packages/crypto/test/`.
 
@@ -114,4 +132,26 @@ tested against known-answer / interoperability-style tests in
   membership change precisely to avoid this; see `packages/protocol/src/senderKeys.ts`.
 - There is no X3DH→PQXDH upgrade path yet.
 - Sealed sender is best-effort: the server still learns the recipient and
-  coarse timing.
+  coarse timing. The server-side `sealedSender` flag and storage path exist
+  (`server/src/sealedSender.ts`), but the web client never sets it — every
+  message currently carries `fromAccountId`/`fromDeviceId` in the clear
+  envelope metadata.
+- A client cannot tell two of its shared groups with the *same* sender apart
+  from the "senderkey" envelope alone (the server intentionally doesn't put
+  a group id on that wire message, to avoid learning which group a message
+  belongs to beyond what fan-out already reveals). The client disambiguates
+  by group membership instead; if you share more than one group with the
+  same person, messages may be attributed to the wrong one. See
+  `resolveGroupIdForSender` in `web/src/lib/groups.ts`.
+- "Delete for everyone" and disappearing messages are enforced client-side
+  only. Nothing stops a modified or non-compliant client from ignoring a
+  delete request or retaining a message past its expiry — there is no way
+  for a sender to force deletion on a device they don't control.
+- There is no read-receipt UI yet, though the server/gateway protocol
+  already carries read events.
+- Multi-device key transfer (linking a new device) hands the new device the
+  *same* long-term identity key pair as the inviting device, over a
+  relay-only ephemeral-ECDH channel the server cannot read. This preserves
+  the existing safety-number trust model, but means a compromised or
+  malicious new device gains full standing as that identity, indistinguishable
+  from any other device of the same account, for as long as it stays linked.

@@ -97,8 +97,15 @@ export function SessionProvider({ children }: { children: ReactNode }): ReactEle
 
     void replenishPreKeysIfNeeded(identity.identity.signing.privateKey);
 
+    // Process events strictly in arrival order. Two events handled
+    // concurrently (e.g. a group's "control" membership update and its
+    // "senderkey-distribution" message, which often arrive back-to-back)
+    // can each read-then-write the same db.groups row; left unserialized,
+    // the slower one can read stale state and clobber the faster one's
+    // already-committed write with it.
+    let processingChain: Promise<void> = Promise.resolve();
     const off = gateway.on((event: GatewayEvent) => {
-      void handleEvent(event);
+      processingChain = processingChain.then(() => handleEvent(event));
     });
 
     async function handleEvent(event: GatewayEvent): Promise<void> {
@@ -115,20 +122,29 @@ export function SessionProvider({ children }: { children: ReactNode }): ReactEle
       if (event.type !== "message" || !identityRef.current) return;
 
       const kp = identityRef.current.identity;
-      switch (event.message.envelopeType) {
-        case "prekey":
-        case "ratchet":
-          await receiveMessage(kp, event);
-          break;
-        case "senderkey-distribution":
-          await handleDistribution(kp, event.message);
-          break;
-        case "senderkey":
-          await handleGroupMessage(event);
-          break;
-        case "control":
-          await handleMembershipChanged(event.message);
-          break;
+      try {
+        switch (event.message.envelopeType) {
+          case "prekey":
+          case "ratchet":
+            await receiveMessage(kp, event);
+            break;
+          case "senderkey-distribution":
+            await handleDistribution(kp, event.message);
+            break;
+          case "senderkey":
+            await handleGroupMessage(event);
+            break;
+          case "control":
+            await handleMembershipChanged(event.message);
+            break;
+        }
+      } catch (err) {
+        // A malformed/adversarial envelope (bad JSON, a corrupt header, a
+        // tampered ciphertext that fails AEAD auth deep inside decrypt)
+        // must not crash message handling or leave this message stuck in
+        // the server's queue forever — log it, drop it, and still ack so
+        // the next connect isn't stalled redelivering the same poison message.
+        console.error("Dropping unprocessable message", event.message.id, err);
       }
       gateway.ackMessages([event.message.id]);
       setInboxVersion((v) => v + 1);
