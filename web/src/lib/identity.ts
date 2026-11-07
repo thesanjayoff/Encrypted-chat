@@ -52,8 +52,13 @@ export interface LoadedIdentity {
 const OTPK_BATCH_SIZE = 20;
 const OTPK_LOW_WATER_MARK = 10;
 
-export async function createLocalIdentity(accountId: string, username: string, deviceId: string): Promise<{ row: IdentityRow; identity: IdentityKeyPair; signedPreKey: ReturnType<typeof generateSignedPreKey>; oneTimePreKeys: ReturnType<typeof generateOneTimePreKeys> }> {
-  const identity = generateIdentityKeyPair();
+export async function createLocalIdentity(
+  accountId: string,
+  username: string,
+  deviceId: string,
+  inheritedIdentity?: IdentityKeyPair,
+): Promise<{ row: IdentityRow; identity: IdentityKeyPair; signedPreKey: ReturnType<typeof generateSignedPreKey>; oneTimePreKeys: ReturnType<typeof generateOneTimePreKeys> }> {
+  const identity = inheritedIdentity ?? generateIdentityKeyPair();
   const signedPreKey = generateSignedPreKey(identity.signing.privateKey, 1);
   const oneTimePreKeys = generateOneTimePreKeys(1, OTPK_BATCH_SIZE);
 

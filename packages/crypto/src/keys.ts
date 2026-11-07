@@ -103,6 +103,19 @@ export function generateEphemeralKeyPair(): KeyPair {
   return generateX25519KeyPair();
 }
 
+/** Raw X25519 Diffie-Hellman, exposed for one-off handshakes outside X3DH
+ * (device-linking's ephemeral key exchange — see web/src/lib/deviceLink.ts). */
+export function x25519Dh(privateKey: Uint8Array, publicKey: Uint8Array): Uint8Array {
+  return x25519.getSharedSecret(privateKey, publicKey);
+}
+
+/** Recomputes an identity's public keys from its private halves — needed
+ * when a device inherits an existing account's identity private keys over
+ * the device-linking channel rather than generating its own. */
+export function identityPublicKeysFrom(signingPrivateKey: Uint8Array, dhPrivateKey: Uint8Array): { signingPublicKey: Uint8Array; dhPublicKey: Uint8Array } {
+  return { signingPublicKey: ed25519.getPublicKey(signingPrivateKey), dhPublicKey: x25519.getPublicKey(dhPrivateKey) };
+}
+
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
   const out = new Uint8Array(a.length + b.length);
   out.set(a, 0);
