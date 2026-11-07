@@ -72,7 +72,7 @@ export interface MessageRow {
   isGroup: boolean;
   direction: "in" | "out";
   senderAccountId: string;
-  kind: "text" | "attachment" | "system";
+  kind: "text" | "attachment" | "system"; // "delete-request" is never persisted as a row — see messaging.ts/groups.ts
   encryptedBody: string; // vault blob of { text? } or { attachmentId, filename, mimeType, size, decryptionKey }
   createdAt: number;
   expiresAt: number | null;
@@ -112,7 +112,7 @@ db.version(1).stores({
   contacts: "accountId, username",
   deviceSessions: "deviceId, contactAccountId",
   groups: "groupId",
-  groupSenderKeys: "id, groupId",
+  groupSenderKeys: "id, groupId, accountId",
   messages: "id, conversationId, createdAt, expiresAt",
   settings: "key",
   outbox: "id, conversationId",

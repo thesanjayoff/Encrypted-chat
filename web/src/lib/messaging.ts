@@ -16,7 +16,7 @@ import { randomUUID } from "./uuid.js";
 import { padMessage, unpadMessage } from "./padding.js";
 import { getSession, putSession, initiateSession, respondToSession, fetchDeviceBundles, type PreKeyMessageHeader } from "./sessions.js";
 import { replenishPreKeysIfNeeded } from "./identity.js";
-import type { GatewayEvent } from "./ws.js";
+import type { GatewayEvent, IncomingMessage } from "./ws.js";
 
 interface WireHeader {
   dhPublicKey: string; // base64
@@ -31,9 +31,14 @@ interface WireMessage {
 }
 
 export interface PlaintextPayload {
-  kind: "text" | "attachment" | "system";
+  kind: "text" | "attachment" | "system" | "delete-request";
   text?: string;
   attachment?: { attachmentId: string; filename: string; mimeType: string; size: number; decryptionKey: string };
+  /** Only for kind "delete-request": the id of an earlier message the
+   * sender asks recipients to delete locally — "delete for everyone." Each
+   * client enforces this itself; nothing stops a modified client from
+   * ignoring it (see README limitations). */
+  targetMessageId?: string;
   sentAt: number;
   disappearingSeconds?: number;
 }
@@ -52,10 +57,22 @@ function fromWireHeader(h: WireHeader): RatchetHeader {
  * multi-device behavior for a pairwise ratchet. */
 export async function sendToContact(identity: IdentityKeyPair, selfAccountId: string, contact: ContactRow, payload: PlaintextPayload): Promise<void> {
   const deviceIds = await deliverRawToAccount(identity, contact.accountId, contact.username, padMessage(utf8(JSON.stringify(payload))));
-  await persistOutgoing(contact.accountId, selfAccountId, payload);
+
+  if (payload.kind === "delete-request" && payload.targetMessageId) {
+    await db.messages.update(payload.targetMessageId, { deletedForEveryone: true });
+  } else {
+    await persistOutgoing(contact.accountId, selfAccountId, payload);
+  }
+
   if (deviceIds.length === 0) {
     await db.outbox.put({ id: randomUUID(), conversationId: contact.accountId, isGroup: false, createdAt: Date.now(), payload });
   }
+}
+
+/** Sends a "delete for everyone" request for a message this device sent
+ * earlier, and marks the local copy deleted immediately. */
+export async function requestDeleteForEveryone(identity: IdentityKeyPair, selfAccountId: string, contact: ContactRow, messageId: string): Promise<void> {
+  await sendToContact(identity, selfAccountId, contact, { kind: "delete-request", targetMessageId: messageId, sentAt: Date.now() });
 }
 
 /** Low-level fan-out: encrypts `plaintext` once per device of `accountId`
@@ -63,21 +80,27 @@ export async function sendToContact(identity: IdentityKeyPair, selfAccountId: st
  * it as envelopeType "prekey"/"ratchet". Used directly by sendToContact for
  * chat messages, and by groups.ts to deliver Sender Key distributions over
  * the same pairwise sessions. Returns the device ids reached. */
-export async function deliverRawToAccount(identity: IdentityKeyPair, accountId: string, username: string, plaintext: Uint8Array): Promise<string[]> {
+export async function deliverRawToAccount(
+  identity: IdentityKeyPair,
+  accountId: string,
+  username: string,
+  plaintext: Uint8Array,
+  envelopeTypeOverride?: "senderkey-distribution",
+): Promise<string[]> {
   let deviceIds = (await db.deviceSessions.where("contactAccountId").equals(accountId).toArray()).map((r) => r.deviceId);
 
   if (deviceIds.length === 0) {
     const bundles = await fetchDeviceBundles(username);
     for (const bundle of bundles) {
       const { state, preKeyHeader } = initiateSession(identity, bundle);
-      await sendEnvelope(bundle.deviceId, accountId, state, plaintext, preKeyHeader);
+      await sendEnvelope(bundle.deviceId, accountId, state, plaintext, preKeyHeader, envelopeTypeOverride);
     }
     deviceIds = bundles.map((b) => b.deviceId);
   } else {
     for (const deviceId of deviceIds) {
       const state = await getSession(deviceId);
       if (!state) continue;
-      await sendEnvelope(deviceId, accountId, state, plaintext);
+      await sendEnvelope(deviceId, accountId, state, plaintext, undefined, envelopeTypeOverride);
     }
   }
   return deviceIds;
@@ -89,6 +112,7 @@ async function sendEnvelope(
   state: DoubleRatchetState,
   plaintext: Uint8Array,
   preKeyHeader?: PreKeyMessageHeader,
+  envelopeTypeOverride?: "senderkey-distribution",
 ): Promise<void> {
   const { header, ciphertext } = ratchetEncrypt(state, plaintext);
   const wire: WireMessage = { header: toWireHeader(header), ciphertext: toBase64(ciphertext), preKeyHeader };
@@ -96,7 +120,11 @@ async function sendEnvelope(
 
   await api.post("/api/messages", {
     toDeviceId: deviceId,
-    envelopeType: preKeyHeader ? "prekey" : "ratchet",
+    // The outer envelopeType is what the server/client dispatch on to tell
+    // a group Sender Key distribution apart from an ordinary chat message —
+    // the inner WireMessage/session plumbing (prekey bootstrap included) is
+    // identical either way, since both travel over the same pairwise ratchet.
+    envelopeType: envelopeTypeOverride ?? (preKeyHeader ? "prekey" : "ratchet"),
     ciphertext: body,
   });
 
@@ -110,7 +138,7 @@ async function persistOutgoing(conversationId: string, selfAccountId: string, pa
     isGroup: false,
     direction: "out",
     senderAccountId: selfAccountId,
-    kind: payload.kind,
+    kind: payload.kind as "text" | "attachment" | "system",
     encryptedBody: vault.encryptJSON(payload),
     createdAt: payload.sentAt,
     expiresAt: payload.disappearingSeconds ? payload.sentAt + payload.disappearingSeconds * 1000 : null,
@@ -120,8 +148,6 @@ async function persistOutgoing(conversationId: string, selfAccountId: string, pa
   };
   await db.messages.put(row);
 }
-
-type IncomingMessage = Extract<GatewayEvent, { type: "message" }>["message"];
 
 /** Decrypts any inbound message that travels over a pairwise Double Ratchet
  * session — covers both envelopeType "prekey"/"ratchet" (ordinary 1:1 chat)
@@ -159,13 +185,27 @@ export async function receiveMessage(identity: IdentityKeyPair, event: Extract<G
   if (!plaintext || !message.fromAccountId) return null;
 
   const payload = JSON.parse(fromUtf8(plaintext)) as PlaintextPayload;
+
+  if (payload.kind === "delete-request") {
+    if (payload.targetMessageId) {
+      // Only the original sender may delete a message for everyone — a
+      // peer referencing someone else's message id must not be able to
+      // make it disappear from this view.
+      const target = await db.messages.get(payload.targetMessageId);
+      if (target && target.senderAccountId === message.fromAccountId) {
+        await db.messages.update(payload.targetMessageId, { deletedForEveryone: true });
+      }
+    }
+    return null;
+  }
+
   const row: MessageRow = {
     id: message.id,
     conversationId: message.fromAccountId,
     isGroup: false,
     direction: "in",
     senderAccountId: message.fromAccountId,
-    kind: payload.kind,
+    kind: payload.kind as "text" | "attachment" | "system",
     encryptedBody: vault.encryptJSON(payload),
     createdAt: message.createdAt,
     expiresAt: payload.disappearingSeconds ? message.createdAt + payload.disappearingSeconds * 1000 : null,

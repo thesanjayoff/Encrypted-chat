@@ -24,6 +24,10 @@ interface DistributionWire {
   chainKey: string; // base64
   signingPublicKey: string; // base64
   iteration: number;
+  // The server never learns a group's name, so the creator (and anyone else
+  // rotating their key) carries along whatever name they have locally —
+  // this is the only channel a new or rejoining member learns it through.
+  groupName?: string;
 }
 
 interface GroupMessageWire {
@@ -77,18 +81,20 @@ export async function rotateAndDistribute(identity: IdentityKeyPair, selfAccount
   const { state, distribution } = createSenderKeyState();
   await storeOwnSenderKey(groupId, selfAccountId, state);
 
+  const localGroup = await db.groups.get(groupId);
   const wire: DistributionWire = {
     kind: "senderkey-distribution",
     groupId,
     chainKey: toBase64(distribution.chainKey),
     signingPublicKey: toBase64(distribution.signingPublicKey),
     iteration: distribution.iteration,
+    groupName: localGroup?.name,
   };
   const plaintext = padMessage(utf8(JSON.stringify(wire)));
 
   for (const member of members) {
     if (member.accountId === selfAccountId) continue;
-    await deliverRawToAccount(identity, member.accountId, member.username, plaintext);
+    await deliverRawToAccount(identity, member.accountId, member.username, plaintext, "senderkey-distribution");
   }
 }
 
@@ -98,7 +104,8 @@ export async function rotateAndDistribute(identity: IdentityKeyPair, selfAccount
 export async function handleDistribution(identity: IdentityKeyPair, message: Parameters<typeof decryptEnvelope>[1]): Promise<void> {
   const plaintext = await decryptEnvelope(identity, message);
   if (!plaintext || !message.fromAccountId) return;
-  const wire = JSON.parse(fromUtf8(unpadMessage(plaintext))) as DistributionWire;
+  // decryptEnvelope already un-pads (it's shared with 1:1 chat decryption).
+  const wire = JSON.parse(fromUtf8(plaintext)) as DistributionWire;
   if (wire.kind !== "senderkey-distribution") return;
 
   const state = receiveSenderKeyDistribution({
@@ -116,6 +123,17 @@ export async function handleDistribution(identity: IdentityKeyPair, message: Par
     updatedAt: Date.now(),
   };
   await db.groupSenderKeys.put(row);
+
+  if (wire.groupName) {
+    const existing = await db.groups.get(wire.groupId);
+    await db.groups.put({
+      groupId: wire.groupId,
+      name: wire.groupName,
+      memberAccountIds: existing?.memberAccountIds ?? [],
+      createdAt: existing?.createdAt ?? Date.now(),
+      disappearingSeconds: existing?.disappearingSeconds,
+    });
+  }
 }
 
 async function loadSenderKey(groupId: string, accountId: string): Promise<SenderKeyState | null> {
@@ -150,7 +168,17 @@ export async function sendGroupMessage(selfAccountId: string, groupId: string, p
   const wire: GroupMessageWire = { iteration, ciphertext: toBase64(ciphertext), signature: toBase64(signature) };
   await api.post(`/api/groups/${groupId}/messages`, { ciphertext: toBase64(utf8(JSON.stringify(wire))) });
 
-  await persistGroupMessage(groupId, selfAccountId, payload);
+  if (payload.kind === "delete-request" && payload.targetMessageId) {
+    await db.messages.update(payload.targetMessageId, { deletedForEveryone: true });
+  } else {
+    await persistGroupMessage(groupId, selfAccountId, payload);
+  }
+}
+
+/** Sends a "delete for everyone" request for a group message this device
+ * sent earlier, and marks the local copy deleted immediately. */
+export async function requestGroupDeleteForEveryone(selfAccountId: string, groupId: string, messageId: string): Promise<void> {
+  await sendGroupMessage(selfAccountId, groupId, { kind: "delete-request", targetMessageId: messageId, sentAt: Date.now() });
 }
 
 async function persistGroupMessage(groupId: string, selfAccountId: string, payload: PlaintextPayload): Promise<void> {
@@ -160,7 +188,7 @@ async function persistGroupMessage(groupId: string, selfAccountId: string, paylo
     isGroup: true,
     direction: "out",
     senderAccountId: selfAccountId,
-    kind: payload.kind,
+    kind: payload.kind as "text" | "attachment" | "system",
     encryptedBody: vault.encryptJSON(payload),
     createdAt: payload.sentAt,
     expiresAt: payload.disappearingSeconds ? payload.sentAt + payload.disappearingSeconds * 1000 : null,
@@ -192,13 +220,24 @@ export async function handleGroupMessage(
   await saveSenderKey(groupId, message.fromAccountId, false, state);
 
   const payload = JSON.parse(fromUtf8(plaintext)) as PlaintextPayload;
+
+  if (payload.kind === "delete-request") {
+    if (payload.targetMessageId) {
+      const target = await db.messages.get(payload.targetMessageId);
+      if (target && target.senderAccountId === message.fromAccountId) {
+        await db.messages.update(payload.targetMessageId, { deletedForEveryone: true });
+      }
+    }
+    return null;
+  }
+
   const row: MessageRow = {
     id: message.id,
     conversationId: groupId,
     isGroup: true,
     direction: "in",
     senderAccountId: message.fromAccountId,
-    kind: payload.kind,
+    kind: payload.kind as "text" | "attachment" | "system",
     encryptedBody: vault.encryptJSON(payload),
     createdAt: message.createdAt,
     expiresAt: payload.disappearingSeconds ? message.createdAt + payload.disappearingSeconds * 1000 : null,

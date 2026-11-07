@@ -1,7 +1,16 @@
 import { WS_BASE } from "./config.js";
 
+export interface IncomingMessage {
+  id: string;
+  fromAccountId: string | null;
+  fromDeviceId: string | null;
+  envelopeType: string;
+  ciphertext: string;
+  createdAt: number;
+}
+
 export type GatewayEvent =
-  | { type: "message"; message: { id: string; fromAccountId: string | null; fromDeviceId: string | null; envelopeType: string; ciphertext: string; createdAt: number } }
+  | { type: "message"; message: IncomingMessage }
   | { type: "typing"; fromDeviceId: string; isTyping: boolean }
   | { type: "read"; fromDeviceId: string; messageId: string };
 

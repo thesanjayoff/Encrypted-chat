@@ -93,6 +93,18 @@ export async function login(password: string, appLockPasscode: string | null): P
   return session;
 }
 
+/** For the common case: a valid session token is already in sessionStorage
+ * (same tab, just reloaded) and only the local vault needs unlocking —
+ * no OPAQUE round-trip required. */
+export async function unlockOnly(passcode: string | null): Promise<Session> {
+  const persisted = loadPersistedSession();
+  if (!persisted) throw new Error("No session to resume — log in instead");
+  const unlocked = passcode ? await vault.unlockWithPasscode(passcode) : await vault.tryAutoUnlock();
+  if (!unlocked) throw new Error("Could not unlock local data — wrong passcode?");
+  setSessionToken(persisted.sessionToken);
+  return persisted;
+}
+
 export function persistSession(session: Session): void {
   sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
 }

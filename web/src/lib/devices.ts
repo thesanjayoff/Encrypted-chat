@@ -16,3 +16,7 @@ export async function listDevices(): Promise<DeviceInfo[]> {
 export async function revokeDevice(deviceId: string): Promise<void> {
   await api.del(`/api/devices/${deviceId}`);
 }
+
+export async function startDeviceLink(): Promise<{ linkToken: string; expiresAt: number }> {
+  return api.post<{ linkToken: string; expiresAt: number }>("/api/devices/link/start");
+}

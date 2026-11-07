@@ -17,7 +17,9 @@ import {
 import { WS_BASE } from "./config.js";
 import { api } from "./api.js";
 import { db } from "./db.js";
+import { vault } from "./vault.js";
 import { createLocalIdentity } from "./identity.js";
+import { randomUUID } from "./uuid.js";
 
 /**
  * Device linking: the server only ever sees a one-time `linkToken` and
@@ -105,7 +107,8 @@ export async function hostDeviceLink(identity: IdentityKeyPair, username: string
  * primary device's display. On success, this device has its own local
  * identity (inherited private keys, freshly generated device prekeys) and
  * an authenticated session, exactly as if it had just registered. */
-export async function joinDeviceLink(linkToken: string, deviceId: string): Promise<{ accountId: string; deviceId: string; sessionToken: string }> {
+export async function joinDeviceLink(linkToken: string, appLockPasscode: string | null): Promise<{ accountId: string; deviceId: string; sessionToken: string }> {
+  await vault.initialize(appLockPasscode);
   const socket = await openSocket(linkToken);
   const ephemeral = generateEphemeralKeyPair();
 
@@ -130,7 +133,7 @@ export async function joinDeviceLink(linkToken: string, deviceId: string): Promi
     dh: { publicKey: dhPublicKey, privateKey: dhPrivate },
   };
 
-  const { signedPreKey, oneTimePreKeys } = await createLocalIdentity("pending", username, deviceId, inheritedIdentity);
+  const { signedPreKey, oneTimePreKeys } = await createLocalIdentity("pending", username, randomUUID(), inheritedIdentity);
 
   const finishRes = await api.post<{ accountId: string; deviceId: string; sessionToken: string }>("/api/devices/link/register", {
     linkToken,
@@ -145,7 +148,10 @@ export async function joinDeviceLink(linkToken: string, deviceId: string): Promi
     },
   });
 
-  await db.identity.update("self", { accountId: finishRes.accountId });
+  // The server assigns the real device id (register.schema doesn't accept
+  // a client-chosen one) — fix up the local row to match, the same way
+  // auth.ts's register() fixes up accountId after the server responds.
+  await db.identity.update("self", { accountId: finishRes.accountId, deviceId: finishRes.deviceId });
   send(socket, { type: "done" });
   socket.close();
   return finishRes;
