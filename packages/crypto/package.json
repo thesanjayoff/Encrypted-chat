@@ -1,0 +1,23 @@
+{
+  "name": "@e2e-chat/crypto",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vetted-primitive cryptographic core: X3DH, Double Ratchet, Sender Keys, safety numbers — built on libsodium, following published specs.",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.4.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@scure/base": "^2.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}
