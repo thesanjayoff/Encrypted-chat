@@ -2,7 +2,7 @@ import { ed25519 } from "@noble/curves/ed25519.js";
 import { hkdfExtract, hkdfExpand } from "./hkdf.js";
 import { hmacSha256 } from "./hmac.js";
 import { aeadDecrypt, aeadEncrypt } from "./aead.js";
-import { concatBytes, randomBytes, toHex, u32be, utf8, zeroize } from "./bytes.js";
+import { concatBytes, fromHex, randomBytes, toHex, u32be, utf8, zeroize } from "./bytes.js";
 import type { KeyPair } from "./keys.js";
 
 /**
@@ -49,6 +49,27 @@ export class SenderKeyState {
     this.signingPublicKey = signingPublicKey;
     this.iteration = iteration;
     this.signingKeyPair = signingKeyPair;
+  }
+
+  toJSON() {
+    return {
+      chainKey: toHex(this.chainKey),
+      signingPublicKey: toHex(this.signingPublicKey),
+      signingPrivateKey: this.signingKeyPair ? toHex(this.signingKeyPair.privateKey) : null,
+      iteration: this.iteration,
+      skipped: [...this.skipped.entries()].map(([i, k]) => ({ iteration: i, messageKey: toHex(k) })),
+    };
+  }
+
+  static fromJSON(json: ReturnType<SenderKeyState["toJSON"]>): SenderKeyState {
+    const state = new SenderKeyState(
+      fromHex(json.chainKey),
+      fromHex(json.signingPublicKey),
+      json.iteration,
+      json.signingPrivateKey ? { publicKey: fromHex(json.signingPublicKey), privateKey: fromHex(json.signingPrivateKey) } : null,
+    );
+    for (const e of json.skipped) state.skipped.set(e.iteration, fromHex(e.messageKey));
+    return state;
   }
 }
 

@@ -2,7 +2,7 @@ import { x25519 } from "@noble/curves/ed25519.js";
 import { hkdfExtract, hkdfExpand } from "./hkdf.js";
 import { hmacSha256 } from "./hmac.js";
 import { aeadDecrypt, aeadEncrypt } from "./aead.js";
-import { concatBytes, toHex, u32be, utf8, zeroize } from "./bytes.js";
+import { concatBytes, fromHex, toHex, u32be, utf8, zeroize } from "./bytes.js";
 import type { KeyPair } from "./keys.js";
 
 /**
@@ -90,6 +90,30 @@ export class DoubleRatchetState {
         messageKey: toHex(e.messageKey),
       })),
     };
+  }
+
+  /** Reconstruct a state previously serialized with `.toJSON()` — e.g. after
+   * loading it back out of an encrypted local database. */
+  static fromJSON(json: ReturnType<DoubleRatchetState["toJSON"]>): DoubleRatchetState {
+    const state = new DoubleRatchetState({
+      rootKey: fromHex(json.rootKey),
+      dhSelf: { publicKey: fromHex(json.dhSelfPublicKey), privateKey: fromHex(json.dhSelfPrivateKey) },
+      dhRemotePublicKey: json.dhRemotePublicKey ? fromHex(json.dhRemotePublicKey) : null,
+      sendingChainKey: json.sendingChainKey ? fromHex(json.sendingChainKey) : null,
+      receivingChainKey: json.receivingChainKey ? fromHex(json.receivingChainKey) : null,
+      associatedData: fromHex(json.associatedData),
+    });
+    state.sendMessageNumber = json.sendMessageNumber;
+    state.receiveMessageNumber = json.receiveMessageNumber;
+    state.previousSendingChainLength = json.previousSendingChainLength;
+    for (const e of json.skipped) {
+      state.skipped.set(`${e.dhPublicKeyHex}:${e.messageNumber}`, {
+        dhPublicKeyHex: e.dhPublicKeyHex,
+        messageNumber: e.messageNumber,
+        messageKey: fromHex(e.messageKey),
+      });
+    }
+    return state;
   }
 }
 
